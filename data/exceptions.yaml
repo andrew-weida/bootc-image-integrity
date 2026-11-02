@@ -1,0 +1,13 @@
+# Approved deviations. Each entry needs every field:
+#   image:   repository of the derived image, without tag or digest
+#   path:    path or glob (* does not cross /); for a forbidden package, its name
+#   ticket:  approval reference
+#   expires: YYYY-MM-DD; the exception stops applying on this date (UTC)
+#   reason:  why the deviation is needed
+#
+# - image: registry.example.com/team-x/app
+#   path: /etc/sysctl.d/99-team-x.conf
+#   ticket: SEC-1234
+#   expires: "2027-03-31"
+#   reason: needs net.core.somaxconn above the hardened default
+exceptions: []

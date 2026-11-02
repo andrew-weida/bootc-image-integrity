@@ -1,0 +1,15 @@
+# Every RUN below defeats part of the base's hardening. test/run-e2e.sh expects each one.
+ARG BASE=localhost/integrity-test/base:latest
+FROM ${BASE}
+RUN printf '#!/bin/sh\nexit 0\n' > /opt/agent/bin/agent
+RUN rm /usr/bin/auditctl
+RUN printf 'PermitRootLogin yes\n' > /etc/ssh/sshd_config.d/01-debug.conf
+RUN chmod 0666 /etc/ssh/sshd_config.d/00-hardening.conf
+RUN printf '*.* stop\n' > /etc/rsyslog.d/00-app.conf
+RUN ln -s /dev/null /etc/sysctl.d/99-hardening.conf
+RUN mkdir -p /etc/systemd/system/agent.service.d && \
+    printf '[Service]\nExecStart=\nExecStart=/usr/bin/true\n' > /etc/systemd/system/agent.service.d/override.conf
+RUN systemctl disable agent.service
+RUN echo /usr/lib64/libevil.so > /etc/ld.so.preload
+RUN printf '#!/bin/sh\n' > /usr/local/bin/sshd && chmod 0755 /usr/local/bin/sshd
+RUN touch /usr/bin/sshd

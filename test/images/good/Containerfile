@@ -1,0 +1,8 @@
+# A well-behaved application image: adds its own content, unit and an allowed rsyslog drop-in.
+ARG BASE=localhost/integrity-test/base:latest
+FROM ${BASE}
+RUN mkdir -p /usr/share/app && echo hello > /usr/share/app/index.html
+RUN printf '[Service]\nExecStart=/usr/bin/sleep infinity\n[Install]\nWantedBy=multi-user.target\n' \
+      > /usr/lib/systemd/system/app.service && \
+    systemctl enable app.service
+RUN printf 'local0.* /var/log/app.log\n' > /etc/rsyslog.d/60-app.conf

@@ -1,0 +1,238 @@
+# bootc image integrity
+
+Checks that a bootc image built `FROM` a hardened base image leaves intact what the base
+protects (security agents, hardening config, the container signature policy) and reports
+anything it changes, removes, overrides or shadows.
+
+```
+syft (base) ──┐
+              ├─ scripts/flatten-syft.py ─ conftest (policy/ + data/) ─ scripts/report.py
+syft (image) ─┘
+```
+
+1. **syft** inventories both images: every file's type, mode, owner, sha256, symlink
+   target, and the layer it came from, plus the files each RPM owns.
+2. **flatten-syft.py** reduces the two inventories to the policy input.
+3. **conftest** evaluates [policy/integrity.rego](policy/integrity.rego) against the
+   configuration in [data/](data/).
+4. **report.py** prints the findings, writes a `TEST_OUTPUT` result, and sets the exit code.
+
+## Open source projects used
+
+| Project | What it is | Used for |
+|---|---|---|
+| [syft](https://github.com/anchore/syft) | SBOM generator for container images and file systems | Inventorying each image's files (type, mode, owner, sha256, layer) and the files each RPM owns |
+| [conftest](https://github.com/open-policy-agent/conftest) | Runs [Open Policy Agent](https://github.com/open-policy-agent/opa) Rego policies against structured data | Evaluating [policy/integrity.rego](policy/integrity.rego) against the flattened inventories; `conftest verify` runs the unit tests |
+
+## What it catches
+
+Every protected path must look exactly as it does in the base image. "Absent" counts as
+a state, so a protected path the base doesn't have must stay absent. That rules out four
+ways a derived build can weaken the base.
+
+### Changing
+
+A protected file is still there but differs from the base: content, permissions, owner,
+or symlink target.
+
+```dockerfile
+RUN chmod 666 /etc/ssh/sshd_config.d/00-hardening.conf
+```
+
+Reported as `modified … changed mode`. A file rewritten with identical content is
+reported as `touched`.
+
+### Removing
+
+A protected file is gone, whether by `rm`, `rpm -e`, or a command that deletes files as a
+side effect.
+
+```dockerfile
+RUN systemctl disable auditd
+```
+
+This deletes the base's `/etc/systemd/system/multi-user.target.wants/auditd.service`
+symlink, so auditd no longer starts. Reported as `deleted`.
+
+### Overriding
+
+The protected file is untouched, but a new file adds settings that take precedence over
+it.
+
+```dockerfile
+RUN mkdir -p /etc/systemd/system/auditd.service.d && \
+    printf '[Service]\nExecStart=\nExecStart=/bin/true\n' \
+      > /etc/systemd/system/auditd.service.d/override.conf
+```
+
+The drop-in clears `ExecStart=` and replaces it, so auditd's unit file is never used as
+written. Reported as `added`, because drop-in directories of protected units are sealed.
+
+A drop-in can also apply to every service at once:
+
+```dockerfile
+RUN mkdir -p /etc/systemd/system/service.d && \
+    printf '[Service]\nEnvironment=LD_PRELOAD=/opt/app/lib/hook.so\n' \
+      > /etc/systemd/system/service.d/10-app.conf
+```
+
+This loads the app's library into every systemd service, including the security agent,
+without touching any of their unit files. Reported as `added`, because
+`/etc/systemd/system/service.d/` is sealed.
+
+### Shadowing
+
+The protected file is untouched, but a new file with the same name sits in a directory
+that is searched first, so the original is never read or run.
+
+```dockerfile
+RUN ln -s /dev/null /etc/sysctl.d/99-hardening.conf
+```
+
+sysctl reads `/etc/sysctl.d/99-hardening.conf` instead of
+`/usr/lib/sysctl.d/99-hardening.conf`, and gets nothing. Likewise, a `/usr/local/bin/sshd`
+runs instead of `/usr/sbin/sshd` because it comes first in `PATH`. Reported as `added`.
+The directory pairs are configured in `shadows`.
+
+### Installing forbidden packages
+
+Separately from the comparison with the base, `forbidden_packages` lists RPMs that must
+never be installed.
+
+```dockerfile
+RUN dnf install -y telnet
+```
+
+Reported as `forbidden telnet`.
+
+### Findings
+
+| Finding | Example |
+|---|---|
+| `modified` | Agent binary replaced, hardening file `chmod 666`, owner changed |
+| `deleted` | `rpm -e` or `rm` of a protected package's files; `systemctl disable` of a protected unit |
+| `added` | `/etc/ld.so.preload`; a file in a sealed directory; a drop-in for a protected unit |
+| `added` (shadow) | `/etc/sysctl.d/99-hardening.conf → /dev/null` masking `/usr/lib/sysctl.d/99-hardening.conf`; `/usr/local/bin/sshd` |
+| `added` (name) | `/etc/rsyslog.d/00-app.conf`, whose name sorts ahead of the base's log forwarding |
+| `forbidden` | `dnf install telnet` when `telnet` is in `forbidden_packages` |
+| `touched` | Protected file rewritten with the same content. This catches changes syft doesn't record (SELinux labels, file capabilities, other xattrs), but only for layered images (below). |
+
+## Configuration
+
+[data/protected.yaml](data/protected.yaml) is an example for a hardened RHEL bootc base.
+Edit it for your base. Everything is keyed under `integrity:`.
+
+| Key | Meaning |
+|---|---|
+| `protected_packages` | Every file the base installs from these RPMs. Include libraries your agents load. |
+| `forbidden_packages` | RPMs that must not be installed in the image, even if the base has them. This only sees RPMs: a binary copied in without one isn't caught. To allow one with an exception, use the package name as `path`. |
+| `protected_files` | Individual paths. A path the base lacks must stay absent. |
+| `sealed_dirs` | Nothing may be added, changed or removed underneath. |
+| `appendable_dirs` | Base files are protected. New files must be direct children matching `allow`. Use this only for directories application teams need to add to, and choose the pattern from the tool's precedence rule. For example, rsyslog runs files in name order and an earlier rule can discard messages, so application files must sort after the base's. |
+| `shadows` | A protected file under a key is overridden by the same name under each listed directory. |
+| `require_layered` | Fail when the base's layers aren't an unchanged prefix of the image's layers (squashed, rechunked, or built `FROM` another base digest). When false, such images only warn and skip `touched`. |
+
+These are derived automatically from the protected set:
+
+- **Unit overrides:** for every protected unit, a unit of the same name is protected in each directory systemd loads units from (`/etc/systemd/system.control/`, `/etc/systemd/system/`, `/etc/systemd/system.attached/`, `/usr/local/lib/systemd/system/`, `/usr/lib/systemd/system/`), which catches replacing or masking it.
+- **Unit drop-in directories:** in each of those directories, every drop-in directory systemd reads for a protected unit is sealed: `<unit>.d/`, one per dash-separated prefix (`falcon-.service.d/` for `falcon-sensor.service`), and the one for every unit of its type (`service.d/`).
+- **Enablement symlinks:** the base's `*.wants/` and `*.requires/` links for protected units are protected.
+
+**Exceptions** go in [data/exceptions.yaml](data/exceptions.yaml). Each one is scoped to one
+image repository and a path glob, and stops applying on its `expires` date. While active, an
+exception turns its violation into a warning; once it expires, the build fails again and
+reports the expiry.
+
+## Run locally
+
+Requires `syft`, `conftest` and `python3`.
+
+```bash
+scripts/check-image.sh \
+  registry:registry.example.com/os/base@sha256:... \
+  registry:registry.example.com/team/app@sha256:...
+```
+
+Environment variables:
+
+| Variable | Effect |
+|---|---|
+| `DATA_DIRS` | Use other configuration directories. |
+| `WORK_DIR` | Keep the intermediate files there. By default they go in a temporary directory that is removed on exit. |
+| `BASE_SYFT_JSON` | Reuse an existing syft inventory of the base instead of scanning it again. This saves about a minute per check on a full bootc image when checking several images against one base. |
+| `KEEP_SYFT=true` | Keep the syft inventories, which are otherwise deleted after flattening (about 100 MB each for a full bootc image). |
+
+## Tekton
+
+[tekton/task.yaml](tekton/task.yaml) runs the same steps.
+
+- **Params:**
+  - `IMAGE` and `BASE_IMAGE`, both by digest
+  - `CHECKOUT_SUBDIR`
+  - `FAIL_ON_VIOLATION`
+- **Workspaces:**
+  - `integrity`: a checkout of this repository
+  - `dockerconfig`: optional pull credentials
+- **Result:** `TEST_OUTPUT`
+
+```yaml
+# Pipeline excerpt. Whoever controls the `integrity` workspace controls the policy, so
+# clone it from a repository the application teams cannot push to, at a pinned commit.
+tasks:
+  - name: fetch-integrity-policy
+    taskRef: {name: git-clone}
+    params:
+      - {name: url, value: https://git.example.com/platform/bootc-image-integrity}
+      - {name: revision, value: <commit sha>}
+    workspaces:
+      - {name: output, workspace: integrity-policy}
+  - name: image-integrity
+    runAfter: [build-image, fetch-integrity-policy]
+    taskRef: {name: bootc-image-integrity}
+    params:
+      - {name: IMAGE, value: "$(tasks.build-image.results.IMAGE_URL)@$(tasks.build-image.results.IMAGE_DIGEST)"}
+      - {name: BASE_IMAGE, value: registry.example.com/os/base@sha256:...}
+    workspaces:
+      - {name: integrity, workspace: integrity-policy}
+```
+
+The step images are pinned by tag. Pin them by digest before production use.
+
+**Sizing**, measured on `quay.io/fedora/fedora-bootc:42` (128,000 files):
+
+- **Each syft scan:** about 1 minute, producing an 87 MB inventory.
+- **conftest:** about 10 seconds. It needs between 512 MiB and 1 GiB of memory, so the
+  Task requests 1 GiB with a 2 GiB limit.
+
+## Gotcha's / Limitations
+
+- **Squashed or rechunked images.** `touched` only works when the base's layers appear
+  unchanged at the bottom of the image, and squashing or rechunking the derived image
+  removes them. With `require_layered: true`, as in the example configuration, such images
+  fail. With it off, they only warn, and the check runs without `touched`. The content
+  checks still run, because they compare file inventories rather than layers, but changes
+  syft doesn't record (SELinux labels, file capabilities, other xattrs) go unnoticed.
+- **Paths are compared literally.** An RPM path that reaches the file through a symlinked
+  directory isn't found in the base inventory, so it isn't protected. Put the real path in
+  `protected_files`.
+- **Effective configuration isn't evaluated.** A setting can be weakened through a path
+  that isn't protected, for example a new `Include` in an unprotected file. Protect the
+  directories each tool reads, or add a runtime check such as `sshd -T`.
+- **Build time only.** Running hosts need their own checks; see the "Protecting the
+  Signature Policy" section of the bootc reference.
+
+## Tests
+
+```bash
+conftest verify --policy policy   # Rego unit tests
+test/run-e2e.sh                   # builds images in test/images and checks expected findings
+test/run-task-locally.sh tampered # runs tekton/task.yaml's steps with podman and a local registry
+```
+
+The test scripts need podman. `run-e2e.sh` runs syft and conftest from container images
+when they aren't installed.
+
+The test images build from `quay.io/fedora/fedora-bootc:44` (about 2 GB). Both scripts
+push them to a temporary local registry, so the base's layers are stored once and discarded
+afterwards. `run-task-locally.sh` evaluates against `data/`, not the test configuration,
+and expects the images `run-e2e.sh` builds.

@@ -1,0 +1,17 @@
+# Configuration for the test images in test/images.
+integrity:
+  protected_packages: [openssh-server, audit, audit-rules]
+  protected_files:
+    - /opt/agent/bin/agent
+    - /usr/lib/systemd/system/agent.service
+    - /usr/lib/sysctl.d/99-hardening.conf
+    - /etc/ssh/sshd_config.d/00-hardening.conf
+    - /etc/ld.so.preload
+  sealed_dirs: [/opt/agent/, /etc/pam.d/, /etc/ssh/sshd_config.d/]
+  appendable_dirs:
+    - dir: /etc/rsyslog.d/
+      allow: '^[5-9][0-9]-[A-Za-z0-9_.-]+\.conf$'
+  shadows:
+    /usr/lib/sysctl.d/: [/etc/sysctl.d/]
+    /usr/lib/systemd/system/: [/etc/systemd/system/]
+    /usr/bin/: [/usr/local/bin/, /usr/local/sbin/]

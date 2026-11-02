@@ -1,0 +1,11 @@
+exceptions:
+  - image: localhost:5002/integrity-test/tampered
+    path: /etc/ld.so.preload
+    ticket: TEST-1
+    expires: "2099-01-01"
+    reason: active exception, turns the violation into a warning
+  - image: localhost:5002/integrity-test/tampered
+    path: /usr/local/bin/*
+    ticket: TEST-2
+    expires: "2020-01-01"
+    reason: expired exception, the violation stays

@@ -1,0 +1,78 @@
+# What derived images must leave exactly as the base image ships it.
+# This is an example for a hardened RHEL bootc base. Add your security agent's package
+# (or paths, if it is not an RPM) and adjust the rest to match your hardening.
+integrity:
+  # Fail images whose layers don't start with the base's layers (squashed, rechunked, or
+  # built FROM another base digest). Without this they only lose the 'touched' checks.
+  require_layered: true
+
+  # Every file the base installs from these RPMs must be identical in derived images.
+  # Include the libraries your agents load: replacing a shared library is as effective
+  # as replacing the agent binary.
+  protected_packages:
+    - audit
+    - audit-libs
+    - crypto-policies
+    - openssh-server
+    - pam
+    - selinux-policy-targeted
+    - sudo
+    # - <your-security-agent>
+
+  # These RPMs must not be installed in derived images, even if the base has them.
+  forbidden_packages:
+    - telnet
+    - telnet-server
+
+  # Individual paths. A path absent from the base must stay absent.
+  protected_files:
+    - /etc/ld.so.preload                  # preloads a library into every process
+    - /etc/sysctl.conf                    # read as /etc/sysctl.d/99-sysctl.conf
+    - /etc/rsyslog.conf                   # includes /etc/rsyslog.d/ ahead of its own rules
+    - /etc/systemd/system.conf            # DefaultEnvironment= applies to every service
+    - /etc/containers/policy.json
+    - /usr/lib/ostree/prepare-root.conf   # composefs / transient /etc settings
+
+  # Nothing may be added, changed or removed under these directories.
+  sealed_dirs:
+    - /etc/audit/rules.d/
+    - /etc/containers/registries.d/
+    - /etc/crypto-policies/
+    - /etc/ld.so.conf.d/
+    - /etc/pam.d/
+    - /etc/pki/containers/
+    - /etc/ssh/sshd_config.d/
+    - /etc/sysctl.d/
+    - /etc/sudoers.d/
+    - /etc/systemd/system.conf.d/         # same settings as system.conf
+    - /usr/lib/systemd/system.conf.d/
+    - /usr/local/lib/systemd/system.conf.d/
+    - /etc/systemd/system-generators/     # run as root early in boot; can override any unit
+    - /usr/lib/systemd/system-generators/
+    - /usr/local/lib/systemd/system-generators/
+    - /etc/systemd/system-environment-generators/   # set the environment of every service
+    - /usr/lib/systemd/system-environment-generators/
+    - /usr/local/lib/systemd/system-environment-generators/
+    - /usr/lib/bootc/kargs.d/
+    - /var/roothome/.config/containers/   # root's policy.json overrides /etc
+
+  # Derived images may add files here only under names that cannot override the base.
+  # Files the base already ships in these directories are protected. List only directories
+  # application teams need to add to; seal the rest.
+  appendable_dirs:
+    # rsyslog runs these files in name order, before the rules in rsyslog.conf, and any rule
+    # can discard a message. Keep the base's forwarding in 00-49 (e.g. 10-siem.conf) so
+    # application files run after it.
+    - dir: /etc/rsyslog.d/
+      allow: '^[5-9][0-9]-[A-Za-z0-9_.-]+\.conf$'
+
+  # A protected file under a key is overridden by the same name under each listed directory.
+  shadows:
+    /usr/lib/sysctl.d/: [/etc/sysctl.d/]
+    /usr/lib/tmpfiles.d/: [/etc/tmpfiles.d/]
+    /usr/lib/sysusers.d/: [/etc/sysusers.d/]
+    /usr/lib/modprobe.d/: [/etc/modprobe.d/]
+    /usr/lib/modules-load.d/: [/etc/modules-load.d/]
+    /usr/lib/systemd/system-preset/: [/etc/systemd/system-preset/]
+    /usr/bin/: [/usr/local/bin/, /usr/local/sbin/]
+    /usr/sbin/: [/usr/local/bin/, /usr/local/sbin/]

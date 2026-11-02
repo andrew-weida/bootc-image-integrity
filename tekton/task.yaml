@@ -1,0 +1,122 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: bootc-image-integrity
+  labels:
+    app.kubernetes.io/version: "0.1"
+spec:
+  description: >-
+    Fails when a bootc image built FROM a hardened base image modifies, removes, overrides
+    or shadows anything the base protects (security agents, hardening config, signature
+    policy). syft inventories both images; conftest evaluates the rules in policy/ against
+    the configuration in data/.
+  params:
+    - name: IMAGE
+      type: string
+      description: Image to check, by digest (registry/repo@sha256:...). Exceptions match its repository.
+    - name: BASE_IMAGE
+      type: string
+      description: The base image IMAGE was built FROM, by digest.
+    - name: CHECKOUT_SUBDIR
+      type: string
+      default: "."
+      description: Directory inside the `integrity` workspace that contains policy/, data/ and scripts/.
+    - name: FAIL_ON_VIOLATION
+      type: string
+      default: "true"
+      description: Set to "false" to report violations without failing the task.
+  workspaces:
+    - name: integrity
+      readOnly: true
+      description: >-
+        A checkout of this repository. Supply it from a source the image's authors cannot
+        change (for example a git-clone of a protected repository at a pinned commit);
+        whoever controls this workspace controls the policy.
+    - name: dockerconfig
+      optional: true
+      readOnly: true
+      description: Directory with a config.json holding pull credentials for both images.
+  results:
+    - name: TEST_OUTPUT
+      description: JSON summary {result, timestamp, namespace, successes, failures, warnings, note}.
+  volumes:
+    - name: work
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - name: work
+        mountPath: /work
+    env:
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: BASE_IMAGE
+        value: $(params.BASE_IMAGE)
+      - name: CHECKOUT
+        value: $(workspaces.integrity.path)/$(params.CHECKOUT_SUBDIR)
+      - name: FAIL_ON_VIOLATION
+        value: $(params.FAIL_ON_VIOLATION)
+      - name: DOCKER_CONFIG # empty when the workspace is not bound; syft then uses its defaults
+        value: $(workspaces.dockerconfig.path)
+      - name: HOME
+        value: /work
+      - name: TMPDIR
+        value: /work
+      - name: SYFT_FILE_METADATA_SELECTION
+        value: all
+      - name: SYFT_FILE_METADATA_DIGESTS
+        value: sha256
+      - name: SYFT_CHECK_FOR_APP_UPDATE
+        value: "false"
+  steps:
+    # The syft image has no shell, so these steps pass arguments directly.
+    - name: scan-base
+      image: docker.io/anchore/syft:v1.56.0
+      command: ["/syft"]
+      args: ["scan", "registry:$(params.BASE_IMAGE)", "-q", "-o", "syft-json=/work/base.syft.json"]
+      computeResources:
+        requests: {cpu: 500m, memory: 1Gi}
+        limits: {memory: 2Gi}
+
+    - name: scan-image
+      image: docker.io/anchore/syft:v1.56.0
+      command: ["/syft"]
+      args: ["scan", "registry:$(params.IMAGE)", "-q", "-o", "syft-json=/work/image.syft.json"]
+      computeResources:
+        requests: {cpu: 500m, memory: 1Gi}
+        limits: {memory: 2Gi}
+
+    - name: flatten
+      image: registry.access.redhat.com/ubi9/ubi:latest
+      script: |
+        #!/bin/sh
+        set -eu
+        python3 "$CHECKOUT/scripts/flatten-syft.py" \
+          --base /work/base.syft.json --image /work/image.syft.json \
+          --base-ref "$BASE_IMAGE" --image-ref "$IMAGE" > /work/input.json
+        rm /work/base.syft.json /work/image.syft.json
+      computeResources:
+        requests: {cpu: 250m, memory: 512Mi}
+        limits: {memory: 1Gi}
+
+    - name: evaluate
+      image: docker.io/openpolicyagent/conftest:v0.71.1
+      # conftest reads a config file named conftest.* from its working directory, so the
+      # output must not use that name in /work.
+      workingDir: /work
+      script: |
+        #!/bin/sh
+        # Exit code 1 means policy failures; the report step decides the task status.
+        conftest test /work/input.json \
+          --policy "$CHECKOUT/policy" --data "$CHECKOUT/data" \
+          --output json > /work/results.json || true
+      computeResources:
+        requests: {cpu: 500m, memory: 1Gi}
+        limits: {memory: 2Gi}
+
+    - name: report
+      image: registry.access.redhat.com/ubi9/ubi:latest
+      script: |
+        #!/bin/sh
+        exec python3 "$CHECKOUT/scripts/report.py" /work/results.json \
+          --test-output "$(results.TEST_OUTPUT.path)" \
+          --fail-on-violation "$FAIL_ON_VIOLATION"

@@ -1,0 +1,7 @@
+# Stand-in for a hardened base: protected RPMs, a fake security agent that is enabled,
+# and hardening files outside any package.
+FROM quay.io/fedora/fedora-bootc:44
+RUN dnf install -y --setopt=install_weak_deps=0 openssh-server audit && dnf clean all
+COPY rootfs/ /
+RUN chmod 0755 /opt/agent/bin/agent && systemctl enable agent.service
+RUN bootc container lint
