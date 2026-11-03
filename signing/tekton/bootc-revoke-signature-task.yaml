@@ -1,0 +1,58 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: bootc-revoke-signature
+  labels:
+    app.kubernetes.io/version: "0.1"
+spec:
+  description: >-
+    Removes IMAGE's signatures and attestations when its verification failed, so hosts stop
+    accepting it for installs and upgrades. Runs as a finally task of bootc-verify-and-sign:
+    re-running that pipeline on signed images withdraws approval once their base is retired
+    or an exception they relied on expires. Hosts already running the image keep running it.
+  params:
+    - name: IMAGE
+      type: string
+      description: The image that was verified, by digest. A tag is never revoked.
+    - name: FIND_BASE_STATUS
+      type: string
+      description: $(tasks.find-base.status) of the pipeline.
+    - name: CHECK_STATUS
+      type: string
+      description: $(tasks.check.status) of the pipeline.
+  workspaces:
+    - name: dockerconfig
+      optional: true
+      readOnly: true
+      description: Directory with a config.json holding credentials to delete signatures.
+  steps:
+    # The -dev image has a shell, at /busybox/sh; the plain cosign image has none.
+    - name: revoke
+      image: gcr.io/projectsigstore/cosign:v3.1.4-dev
+      env:
+        - name: IMAGE
+          value: $(params.IMAGE)
+        - name: FIND_BASE_STATUS
+          value: $(params.FIND_BASE_STATUS)
+        - name: CHECK_STATUS
+          value: $(params.CHECK_STATUS)
+        - name: DOCKER_CONFIG # empty when the workspace is not bound
+          value: $(workspaces.dockerconfig.path)
+      script: |
+        #!/busybox/sh
+        set -eu
+        if [ "$FIND_BASE_STATUS" != Failed ] && [ "$CHECK_STATUS" != Failed ]; then
+          echo "verification did not fail; nothing to revoke"
+          exit 0
+        fi
+        # A tag may now point at a different, legitimately signed image.
+        if ! echo "$IMAGE" | grep -Eq '^[^@[:space:]]+@sha256:[0-9a-f]{64}$'; then
+          echo "$IMAGE is not pinned by digest; not revoking anything"
+          exit 0
+        fi
+        echo "verification of $IMAGE failed; removing its signatures and attestations"
+        # shellcheck disable=SC2086 # COSIGN_OPTS is a list of options
+        exec cosign clean --type all --force ${COSIGN_OPTS:-} "$IMAGE"
+      computeResources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {memory: 256Mi}

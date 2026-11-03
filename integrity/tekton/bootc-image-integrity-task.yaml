@@ -13,14 +13,18 @@ spec:
   params:
     - name: IMAGE
       type: string
-      description: Image to check, by digest (registry/repo@sha256:...). Exceptions match its repository.
+      description: >-
+        Image to check, by digest (registry/repo@sha256:...); not a tag or an index of
+        platforms. Exceptions match its repository.
     - name: BASE_IMAGE
       type: string
-      description: The base image IMAGE was built FROM, by digest.
+      description: The base image IMAGE was built FROM, by digest; not a tag or an index.
     - name: CHECKOUT_SUBDIR
       type: string
-      default: "."
-      description: Directory inside the `integrity` workspace that contains policy/, data/ and scripts/.
+      default: integrity
+      description: >-
+        Directory inside the `integrity` workspace that contains policy/, data/ and scripts/:
+        integrity/ in a checkout of this repository.
     - name: FAIL_ON_VIOLATION
       type: string
       default: "true"
@@ -68,6 +72,22 @@ spec:
       - name: SYFT_CHECK_FOR_APP_UPDATE
         value: "false"
   steps:
+    # A tag could move between the scans and anything that trusts the result, and syft
+    # would scan only one platform of an index.
+    - name: check-refs
+      image: quay.io/skopeo/stable:v1.22.3
+      script: |
+        #!/bin/sh
+        set -eu
+        if [ -n "$DOCKER_CONFIG" ] && [ -f "$DOCKER_CONFIG/config.json" ]; then
+          export SKOPEO_OPTS="${SKOPEO_OPTS:-} --authfile $DOCKER_CONFIG/config.json"
+        fi
+        sh "$CHECKOUT/scripts/check-ref.sh" "$IMAGE"
+        sh "$CHECKOUT/scripts/check-ref.sh" "$BASE_IMAGE"
+      computeResources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {memory: 128Mi}
+
     # The syft image has no shell, so these steps pass arguments directly.
     - name: scan-base
       image: docker.io/anchore/syft:v1.56.0

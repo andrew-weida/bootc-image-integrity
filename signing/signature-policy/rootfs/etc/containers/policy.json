@@ -1,0 +1,25 @@
+{
+  "default": [{"type": "reject"}],
+  "transports": {
+    "docker": {
+      "registry.example.com/os": [
+        {
+          "type": "sigstoreSigned",
+          "keyPath": "/etc/pki/containers/base.pub",
+          "signedIdentity": {"type": "matchRepository"}
+        }
+      ],
+      "registry.example.com/apps": [
+        {
+          "type": "sigstoreSigned",
+          "keyPath": "/etc/pki/containers/verifier.pub",
+          "signedIdentity": {"type": "matchRepository"}
+        }
+      ],
+      "registry.example.com/containers": [{"type": "insecureAcceptAnything"}]
+    },
+    "containers-storage": {
+      "": [{"type": "insecureAcceptAnything"}]
+    }
+  }
+}

@@ -1,0 +1,64 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: bootc-find-base
+  labels:
+    app.kubernetes.io/version: "0.1"
+spec:
+  description: >-
+    Finds the approved base image that IMAGE was built FROM, by comparing layers instead of
+    trusting labels the image's authors control. Fails if IMAGE isn't a single image pinned
+    by digest, or if no approved base matches, which means IMAGE was built from an
+    unapproved base or was squashed or rechunked.
+  params:
+    - name: IMAGE
+      type: string
+      description: Image to check, by digest (registry/repo@sha256:...). Not a tag or an index.
+    - name: APPROVED_BASES
+      type: string
+      default: signing/approved-bases.txt
+      description: File inside the checkout listing the approved base images by digest.
+    - name: CHECKOUT_SUBDIR
+      type: string
+      default: "."
+      description: Directory inside the `checkout` workspace that holds this repository's integrity/ and signing/.
+  workspaces:
+    - name: checkout
+      readOnly: true
+      description: >-
+        A checkout of this repository from a source the image's authors cannot change.
+        It supplies the list of approved bases.
+    - name: dockerconfig
+      optional: true
+      readOnly: true
+      description: Directory with a config.json holding pull credentials.
+  results:
+    - name: BASE_IMAGE
+      description: The approved base IMAGE was built FROM, by digest.
+  steps:
+    - name: find-base
+      image: quay.io/skopeo/stable:v1.22.3
+      env:
+        - name: IMAGE
+          value: $(params.IMAGE)
+        - name: CHECKOUT
+          value: $(workspaces.checkout.path)/$(params.CHECKOUT_SUBDIR)
+        - name: APPROVED_BASES
+          value: $(params.APPROVED_BASES)
+        - name: DOCKERCONFIG_BOUND
+          value: $(workspaces.dockerconfig.bound)
+        - name: DOCKERCONFIG_PATH
+          value: $(workspaces.dockerconfig.path)
+      script: |
+        #!/bin/sh
+        set -eu
+        if [ "$DOCKERCONFIG_BOUND" = true ]; then
+          export SKOPEO_OPTS="${SKOPEO_OPTS:-} --authfile $DOCKERCONFIG_PATH/config.json"
+        fi
+        sh "$CHECKOUT/integrity/scripts/check-ref.sh" "$IMAGE"
+        base=$(sh "$CHECKOUT/signing/scripts/find-base.sh" "$IMAGE" "$CHECKOUT/$APPROVED_BASES")
+        echo "$IMAGE was built FROM $base"
+        printf %s "$base" > "$(results.BASE_IMAGE.path)"
+      computeResources:
+        requests: {cpu: 100m, memory: 128Mi}
+        limits: {memory: 256Mi}

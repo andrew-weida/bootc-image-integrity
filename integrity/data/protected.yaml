@@ -69,6 +69,12 @@ integrity:
     - /etc/sysusers.d/          # can create a UID 0 user; use DynamicUser=
     - /etc/security/limits.d/   # applies to logins, not services; use LimitNOFILE= in the unit
     - /etc/modprobe.d/          # changes how kernel modules load
+    # Quadlet .container files start any image as root, with any options, including
+    # --privileged; the images need not be signed. This also blocks teams from shipping
+    # quadlets in the OS image. Move these to appendable_dirs or add exceptions if they must.
+    # A plain service unit running `podman run` still works, so this is not a boundary.
+    - /etc/containers/systemd/          # also covers /etc/containers/systemd/users/
+    - /usr/share/containers/systemd/
     # Packages ship the same kinds of files under /usr/lib. Uncomment to block that too;
     # installing such a package then needs an exception.
     # - /usr/lib/tmpfiles.d/

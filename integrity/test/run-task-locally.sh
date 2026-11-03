@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run tekton/task.yaml's steps with podman instead of a cluster: each step's command or
+# Run tekton/bootc-image-integrity-task.yaml's steps with podman instead of a cluster: each step's command or
 # script runs in the step's image, with the Task's environment and a shared /work volume.
 # The images come from a throwaway local registry, so test/run-e2e.sh must have built them.
 #
@@ -29,14 +29,14 @@ push() {
 base_image=$(push base)
 image=$(push "$name")
 
-yq() { podman run --rm -i "$YQ_IMAGE" "$@" < "$root/tekton/task.yaml"; }
+yq() { podman run --rm -i "$YQ_IMAGE" "$@" < "$root/tekton/bootc-image-integrity-task.yaml"; }
 
 env_args=(
   -e "IMAGE=$image" -e "BASE_IMAGE=$base_image" -e CHECKOUT=/checkout/.
   -e FAIL_ON_VIOLATION=true -e DOCKER_CONFIG= -e HOME=/work -e TMPDIR=/work
   -e SYFT_FILE_METADATA_SELECTION=all -e SYFT_FILE_METADATA_DIGESTS=sha256
   -e SYFT_CHECK_FOR_APP_UPDATE=false
-  -e SYFT_REGISTRY_INSECURE_USE_HTTP=true # local registry only; not in the Task
+  -e SYFT_REGISTRY_INSECURE_USE_HTTP=true -e SKOPEO_OPTS=--tls-verify=false # local registry only
 )
 mounts=(-v "$work/work:/work:Z" -v "$root:/checkout:ro,Z")
 

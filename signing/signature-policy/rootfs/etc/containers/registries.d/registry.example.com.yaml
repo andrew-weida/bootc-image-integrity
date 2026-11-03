@@ -1,0 +1,4 @@
+# Look for cosign signatures (sha256-<digest>.sig tags) next to images on this registry.
+docker:
+  registry.example.com:
+    use-sigstore-attachments: true

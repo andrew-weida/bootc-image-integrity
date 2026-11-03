@@ -1,0 +1,9 @@
+# Base images that application images may be built FROM, one per line, by digest. For a
+# multi-platform base, list each platform's image digest, not the index's.
+# scripts/find-base.sh reads this to work out which base an image was built on.
+#
+# The base image pipeline adds each base it publishes. Remove a line to stop signing images
+# built on that base, for example once it is more than 30 days old; teams then have to
+# rebuild on a newer one.
+#
+# registry.example.com/os/base@sha256:...

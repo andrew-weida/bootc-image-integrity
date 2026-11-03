@@ -1,0 +1,95 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: bootc-verify-and-sign
+  labels:
+    app.kubernetes.io/version: "0.1"
+spec:
+  description: >-
+    Verifies an application image and signs it if it passes. Run it for every image pushed
+    to the application repositories (for example from a registry webhook through Tekton
+    Triggers), so images are verified whether or not their own pipeline ran the check.
+    Hosts that only accept images signed by this pipeline then can't run an unverified one.
+    When verification fails, the finally task removes any earlier signature, so re-running
+    the pipeline on signed images withdraws approval that no longer holds.
+  params:
+    - name: IMAGE
+      type: string
+      description: The pushed image, by digest; not a tag or an index of platforms.
+    - name: POLICY_URL
+      type: string
+      description: Git URL of this repository, owned by the security team.
+    - name: POLICY_REVISION
+      type: string
+      description: Commit of the policy repository to use.
+    - name: APPROVED_BASES
+      type: string
+      default: signing/approved-bases.txt
+      description: File inside the policy checkout listing the approved base images.
+    - name: SIGNING_KEY
+      type: string
+      default: ""
+      description: cosign KMS URI. Leave empty to use the key in the `signing-key` workspace.
+  workspaces:
+    - name: policy
+      description: Scratch space for the policy checkout, e.g. a volumeClaimTemplate.
+    - name: dockerconfig
+      optional: true
+      description: config.json with credentials to pull both images and push signatures.
+    - name: signing-key
+      optional: true
+      description: Secret with cosign.key and cosign.password, when SIGNING_KEY is empty.
+  tasks:
+    - name: fetch-policy
+      taskRef: {name: git-clone} # from the Tekton catalog
+      params:
+        - {name: url, value: $(params.POLICY_URL)}
+        - {name: revision, value: $(params.POLICY_REVISION)}
+      workspaces:
+        - {name: output, workspace: policy}
+
+    - name: find-base
+      runAfter: [fetch-policy]
+      taskRef: {name: bootc-find-base}
+      params:
+        - {name: IMAGE, value: $(params.IMAGE)}
+        - {name: APPROVED_BASES, value: $(params.APPROVED_BASES)}
+      workspaces:
+        - {name: checkout, workspace: policy}
+        - {name: dockerconfig, workspace: dockerconfig}
+
+    - name: check
+      taskRef: {name: bootc-image-integrity}
+      params:
+        - {name: IMAGE, value: $(params.IMAGE)}
+        - {name: BASE_IMAGE, value: $(tasks.find-base.results.BASE_IMAGE)}
+        - {name: FAIL_ON_VIOLATION, value: "true"}
+      workspaces:
+        - {name: integrity, workspace: policy}
+        - {name: dockerconfig, workspace: dockerconfig}
+
+    - name: sign
+      taskRef: {name: bootc-sign-image}
+      params:
+        - {name: IMAGE, value: $(params.IMAGE)}
+        - {name: BASE_IMAGE, value: $(tasks.find-base.results.BASE_IMAGE)}
+        - {name: TEST_OUTPUT, value: $(tasks.check.results.TEST_OUTPUT)}
+        - {name: POLICY_REVISION, value: $(tasks.fetch-policy.results.commit)}
+        - {name: KEY, value: $(params.SIGNING_KEY)}
+      workspaces:
+        - {name: checkout, workspace: policy}
+        - {name: signing-key, workspace: signing-key}
+        - {name: dockerconfig, workspace: dockerconfig}
+
+  finally:
+    # Withdraw approval when the image no longer passes: for example on a periodic re-run
+    # after its base was retired or an exception expired. A check that fails for any
+    # reason, including an unreachable registry, removes the signature; re-run to restore.
+    - name: revoke
+      taskRef: {name: bootc-revoke-signature}
+      params:
+        - {name: IMAGE, value: $(params.IMAGE)}
+        - {name: FIND_BASE_STATUS, value: $(tasks.find-base.status)}
+        - {name: CHECK_STATUS, value: $(tasks.check.status)}
+      workspaces:
+        - {name: dockerconfig, workspace: dockerconfig}

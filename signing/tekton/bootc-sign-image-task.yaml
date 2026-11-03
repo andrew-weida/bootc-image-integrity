@@ -1,0 +1,117 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: bootc-sign-image
+  labels:
+    app.kubernetes.io/version: "0.1"
+spec:
+  description: >-
+    Signs IMAGE with cosign and attaches the integrity result as an attestation. Run it only
+    after bootc-image-integrity succeeds. It also checks for itself that TEST_OUTPUT reports
+    a pass with no failures, and that IMAGE is a single image pinned by digest.
+  params:
+    - name: IMAGE
+      type: string
+      description: Image to sign, by digest. Not a tag or an index.
+    - name: BASE_IMAGE
+      type: string
+      description: The base IMAGE was checked against, recorded in the attestation.
+    - name: TEST_OUTPUT
+      type: string
+      description: The TEST_OUTPUT result of bootc-image-integrity.
+    - name: POLICY_REVISION
+      type: string
+      description: Commit of the policy checkout, recorded in the attestation.
+    - name: KEY
+      type: string
+      default: ""
+      description: >-
+        cosign key reference, such as a KMS URI (awskms://..., gcpkms://..., hashivault://...).
+        Leave empty to use cosign.key, and cosign.password if present, from the
+        `signing-key` workspace.
+    - name: CHECKOUT_SUBDIR
+      type: string
+      default: "."
+      description: Directory inside the `checkout` workspace that holds this repository's integrity/ and signing/.
+  workspaces:
+    - name: checkout
+      readOnly: true
+      description: A checkout of this repository, for its scripts.
+    - name: signing-key
+      optional: true
+      readOnly: true
+      description: >-
+        A Secret with cosign.key and optionally cosign.password. Only this pipeline should be
+        able to read it.
+    - name: dockerconfig
+      optional: true
+      readOnly: true
+      description: Directory with a config.json holding credentials to push signatures.
+  stepTemplate:
+    env:
+      - name: IMAGE
+        value: $(params.IMAGE)
+      - name: TEST_OUTPUT
+        value: $(params.TEST_OUTPUT)
+      - name: CHECKOUT
+        value: $(workspaces.checkout.path)/$(params.CHECKOUT_SUBDIR)
+  steps:
+    # Each check runs in an image with the tool it needs; cosign's image has neither.
+    - name: check-result
+      image: registry.access.redhat.com/ubi9/ubi:latest
+      script: |
+        #!/bin/sh
+        printf %s "$TEST_OUTPUT" | exec python3 "$CHECKOUT/signing/scripts/check-result.py" -
+      computeResources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {memory: 128Mi}
+
+    - name: check-ref
+      image: quay.io/skopeo/stable:v1.22.3
+      env:
+        - name: DOCKERCONFIG_BOUND
+          value: $(workspaces.dockerconfig.bound)
+        - name: DOCKERCONFIG_PATH
+          value: $(workspaces.dockerconfig.path)
+      script: |
+        #!/bin/sh
+        set -eu
+        if [ "$DOCKERCONFIG_BOUND" = true ]; then
+          export SKOPEO_OPTS="${SKOPEO_OPTS:-} --authfile $DOCKERCONFIG_PATH/config.json"
+        fi
+        exec sh "$CHECKOUT/integrity/scripts/check-ref.sh" "$IMAGE"
+      computeResources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {memory: 128Mi}
+
+    # The -dev image has a shell, at /busybox/sh; the plain cosign image has none.
+    - name: sign
+      image: gcr.io/projectsigstore/cosign:v3.1.4-dev
+      env:
+        - name: BASE_IMAGE
+          value: $(params.BASE_IMAGE)
+        - name: POLICY_REVISION
+          value: $(params.POLICY_REVISION)
+        - name: KEY
+          value: $(params.KEY)
+        - name: KEY_DIR
+          value: $(workspaces.signing-key.path)
+        - name: DOCKER_CONFIG # empty when the workspace is not bound
+          value: $(workspaces.dockerconfig.path)
+      script: |
+        #!/busybox/sh
+        set -eu
+        COSIGN_PASSWORD=
+        if [ -z "$KEY" ]; then
+          KEY="$KEY_DIR/cosign.key"
+          if [ -f "$KEY_DIR/cosign.password" ]; then
+            COSIGN_PASSWORD=$(cat "$KEY_DIR/cosign.password")
+          fi
+        fi
+        export COSIGN_KEY="$KEY" COSIGN_PASSWORD
+        printf %s "$TEST_OUTPUT" > /tmp/test-output.json
+        exec sh "$CHECKOUT/signing/scripts/sign-image.sh" \
+          "$IMAGE" "$BASE_IMAGE" "$POLICY_REVISION" /tmp/test-output.json
+      computeResources:
+        requests: {cpu: 100m, memory: 128Mi}
+        limits: {memory: 512Mi}
