@@ -31,7 +31,9 @@ integrity:
     - /etc/rsyslog.conf                   # includes /etc/rsyslog.d/ ahead of its own rules
     - /etc/systemd/system.conf            # DefaultEnvironment= applies to every service
     - /etc/containers/policy.json
+    - /etc/selinux/config                 # SELINUX=permissive disables enforcement
     - /usr/lib/ostree/prepare-root.conf   # composefs / transient /etc settings
+    - /etc/ostree/prepare-root.conf       # overrides the /usr/lib file via the initramfs
 
   # Nothing may be added, changed or removed under these directories.
   sealed_dirs:

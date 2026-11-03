@@ -136,7 +136,11 @@ These are derived automatically from the protected set:
 
 - **Unit overrides:** for every protected unit, a unit of the same name is protected in each directory systemd loads units from (`/etc/systemd/system.control/`, `/etc/systemd/system/`, `/etc/systemd/system.attached/`, `/usr/local/lib/systemd/system/`, `/usr/lib/systemd/system/`), which catches replacing or masking it.
 - **Unit drop-in directories:** in each of those directories, every drop-in directory systemd reads for a protected unit is sealed: `<unit>.d/`, one per dash-separated prefix (`falcon-.service.d/` for `falcon-sensor.service`), and the one for every unit of its type (`service.d/`).
+- **Template instances:** for a protected template such as `worker@.service`, instance unit files and drop-ins (`worker@one.service`, `worker@one.service.d/`) are watched, and the base's enablement links for its instances are protected.
 - **Enablement symlinks:** the base's `*.wants/` and `*.requires/` links for protected units are protected.
+- **Redirecting symlinks:** a new symlink at a sealed or appendable directory, or at any directory above a watched path, is reported, because it moves the contents somewhere the check doesn't look. Symlinks the base already has are allowed.
+
+The configuration itself is validated: a missing `integrity:` section, an unknown or mistyped key, or a configuration that protects nothing fails the check instead of silently protecting less.
 
 **Exceptions** go in [data/exceptions.yaml](data/exceptions.yaml). Each one is scoped to one
 image repository and a path glob, and stops applying on its `expires` date. While active, an
@@ -159,7 +163,7 @@ Environment variables:
 |---|---|
 | `DATA_DIRS` | Use other configuration directories. |
 | `WORK_DIR` | Keep the intermediate files there. By default they go in a temporary directory that is removed on exit. |
-| `BASE_SYFT_JSON` | Reuse an existing syft inventory of the base instead of scanning it again. This saves about a minute per check on a full bootc image when checking several images against one base. |
+| `BASE_SYFT_JSON` | Reuse an existing syft inventory of the base instead of scanning it again. This saves about a minute per check on a full bootc image when checking several images against one base. The check stops if the inventory wasn't scanned from the requested base digest. |
 | `KEEP_SYFT=true` | Keep the syft inventories, which are otherwise deleted after flattening (about 100 MB each for a full bootc image). |
 
 ## Tekton

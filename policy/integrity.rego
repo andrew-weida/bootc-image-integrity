@@ -82,12 +82,13 @@ protected_units contains name if {
 	base.files[p].type == "RegularFile"
 }
 
-# Enablement symlinks the base ships for protected units (removing one disables the unit).
+# Enablement symlinks the base ships for protected units (removing one disables the unit),
+# including instances of protected templates (worker@one.service for worker@.service).
 protected contains p if {
 	some p, f in base.files
 	f.type == "SymbolicLink"
 	regex.match(`^/(etc|usr/lib)/systemd/system/[^/]+\.(wants|requires)/[^/]+$`, p)
-	basename(p) in protected_units
+	template_of(basename(p)) in protected_units
 }
 
 # Sealed directories: nothing may be added, changed or removed underneath.
@@ -128,6 +129,26 @@ dropin_names(unit) := names if {
 		k > 0
 	}
 	names := prefixes | {concat("", [unit, ".d"]), concat("", [type, ".d"])}
+}
+
+# Instances of a protected template can have their own unit file (worker@one.service) and
+# drop-ins (worker@one.service.d/), which systemd reads in addition to the template's.
+template_prefixes contains concat("", [dir, substring(unit, 0, indexof(unit, "@") + 1)]) if {
+	some unit in protected_units
+	contains(unit, "@.")
+	some dir in unit_dirs
+}
+
+watched contains p if {
+	some prefix in template_prefixes
+	some p, _ in base.files
+	startswith(p, prefix)
+}
+
+watched contains p if {
+	some prefix in template_prefixes
+	some p, _ in image.files
+	startswith(p, prefix)
 }
 
 watched contains p if some p in protected
@@ -212,6 +233,36 @@ allowed_name(name, pattern) if {
 	regex.match(pattern, name)
 }
 
+# A symlink at a sealed or appendable directory, or at any directory above a watched path,
+# moves the contents somewhere the check doesn't look: /etc/systemd/system/agent.service.d
+# pointing at /opt/overrides. Symlinks the base already has are fine.
+guarded_dirs := {trim_suffix(d, "/") | some d in (sealed_dirs | appendable_prefixes)}
+
+redirect_candidates contains d if some d in guarded_dirs
+
+redirect_candidates contains a if {
+	some p in (guarded_dirs | watched)
+	some a in ancestors(p)
+}
+
+findings contains finding(p, kind, f.layer, sprintf("symlink to %s redirects a protected location", [f.link])) if {
+	some p in redirect_candidates
+	not p in watched
+	f := image.files[p]
+	f.type == "SymbolicLink"
+	not base_has_same(p, f)
+	kind := redirect_kind(p)
+}
+
+redirect_kind(p) := "modified" if base.files[p]
+
+redirect_kind(p) := "added" if not base.files[p]
+
+base_has_same(p, f) if {
+	b := base.files[p]
+	every k in fields { b[k] == f[k] }
+}
+
 # Forbidden packages fail whenever the image has them installed, even if the base does too.
 # The finding's path is the package name, so exceptions match on it.
 findings contains finding(name, "forbidden", "", "package must not be installed") if {
@@ -246,7 +297,68 @@ active_exceptions(path) := {e |
 excepted(path) if count(active_exceptions(path)) > 0
 
 # ---------------------------------------------------------------------------
+# Configuration checks. A missing, misspelled or mistyped key would otherwise silently
+# protect nothing.
+
+config_keys := {"require_layered", "forbidden_packages", "protected_packages", "protected_files", "sealed_dirs", "appendable_dirs", "shadows"}
+
+string_list_keys := ["forbidden_packages", "protected_packages", "protected_files", "sealed_dirs"]
+
+config_errors contains "data.integrity is missing or not a map" if not is_object(data.integrity)
+
+config_errors contains sprintf("unknown key %s", [k]) if {
+	some k, _ in cfg
+	not k in config_keys
+}
+
+config_errors contains sprintf("%s must be a list of strings", [k]) if {
+	some k in string_list_keys
+	v := cfg[k]
+	not string_list(v)
+}
+
+config_errors contains "require_layered must be true or false" if {
+	v := cfg.require_layered
+	not is_boolean(v)
+}
+
+config_errors contains "appendable_dirs must be a list of {dir, allow} entries" if {
+	v := cfg.appendable_dirs
+	not valid_appendable(v)
+}
+
+config_errors contains "shadows must map each directory to a list of directories" if {
+	v := cfg.shadows
+	not valid_shadows(v)
+}
+
+config_errors contains "nothing is protected; set protected_packages or protected_files" if {
+	is_object(data.integrity)
+	count(object.get(cfg, "protected_packages", [])) + count(object.get(cfg, "protected_files", [])) == 0
+}
+
+string_list(v) if {
+	is_array(v)
+	every x in v { is_string(x) }
+}
+
+valid_appendable(v) if {
+	is_array(v)
+	every a in v {
+		is_string(a.dir)
+		is_string(a.allow)
+	}
+}
+
+valid_shadows(v) if {
+	is_object(v)
+	every _, targets in v { string_list(targets) }
+}
+
+# ---------------------------------------------------------------------------
 # Results
+
+deny contains {"msg": sprintf("invalid configuration: %s", [e])} if some e in config_errors
 
 deny contains {"msg": message(v), "details": v} if {
 	some v in findings
@@ -305,3 +417,19 @@ dir_prefix(d) := d if endswith(d, "/")
 dir_prefix(d) := concat("", [d, "/"]) if not endswith(d, "/")
 
 basename(p) := parts[count(parts) - 1] if parts := split(p, "/")
+
+# "/etc/systemd/system/x.conf" -> {"/etc", "/etc/systemd", "/etc/systemd/system"}
+ancestors(p) := {concat("/", array.slice(parts, 0, k)) |
+	parts := split(p, "/")
+	some k in numbers.range(2, count(parts))
+	k < count(parts)
+}
+
+# "worker@one.service" -> "worker@.service"; other unit names are returned unchanged.
+template_of(name) := name if not contains(name, "@")
+
+template_of(name) := concat("", [substring(name, 0, indexof(name, "@") + 1), ".", type]) if {
+	contains(name, "@")
+	parts := split(name, ".")
+	type := parts[count(parts) - 1]
+}

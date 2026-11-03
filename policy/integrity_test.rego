@@ -324,3 +324,82 @@ test_missing_protected_package if {
 	warned := main.warn with input as derived({}, []) with data.integrity as object.union(cfg, {"protected_packages": ["openssh-server", "nope"]})
 	messages(warned) == {"protected package nope is not installed in the base image"}
 }
+
+# --- review findings -------------------------------------------------------
+
+test_symlinked_sealed_dir if {
+	inp := derived(
+		{
+			"/etc/systemd/system/agent.service.d": symlink("/opt/overrides", "L3"),
+			"/opt/overrides/override.conf": file("override", "L3"),
+		},
+		[],
+	)
+	found(deny_for(inp)) == {["added", "/etc/systemd/system/agent.service.d"]}
+}
+
+test_symlinked_ancestor if {
+	inp := derived({"/etc/systemd/system.control": symlink("/opt/control", "L3")}, [])
+	found(deny_for(inp)) == {["added", "/etc/systemd/system.control"]}
+}
+
+test_base_symlink_unchanged_passes if {
+	inp := {
+		"base": object.union(base, {"files": {"/opt": symlink("var/opt", "L1")}}),
+		"image": object.union(derived({}, [])["image"], {"files": {"/opt": symlink("var/opt", "L1")}}),
+	}
+	count(deny_for(inp)) == 0
+}
+
+test_missing_config_fails if {
+	denied := main.deny with input as derived({}, []) with data.integrity as null
+	messages(denied) == {"invalid configuration: data.integrity is missing or not a map"}
+}
+
+test_empty_config_fails if {
+	denied := main.deny with input as derived({}, []) with data.integrity as {}
+	messages(denied) == {"invalid configuration: nothing is protected; set protected_packages or protected_files"}
+}
+
+test_mistyped_config_fails if {
+	bad := object.union(cfg, {"sealed_dirs": "/etc/pam.d", "protected_file": ["/x"], "require_layered": "yes"})
+	denied := main.deny with input as derived({}, []) with data.integrity as bad
+	messages(denied) == {
+		"invalid configuration: sealed_dirs must be a list of strings",
+		"invalid configuration: unknown key protected_file",
+		"invalid configuration: require_layered must be true or false",
+	}
+}
+
+template_files := object.union(base_files, {
+	"/usr/lib/systemd/system/worker@.service": file("worker", "L2"),
+	"/etc/systemd/system/multi-user.target.wants/worker@one.service": symlink("/usr/lib/systemd/system/worker@.service", "L2"),
+})
+
+template_cfg := object.union(cfg, {"protected_files": array.concat(cfg.protected_files, ["/usr/lib/systemd/system/worker@.service"])})
+
+template_input(changes, removed) := {
+	"base": object.union(base, {"files": template_files}),
+	"image": object.union(derived({}, [])["image"], {"files": object.union(object.remove(template_files, removed), changes)}),
+}
+
+test_template_instance_overrides if {
+	inp := template_input(
+		{
+			"/etc/systemd/system/worker@one.service": file("fake", "L3"),
+			"/etc/systemd/system/worker@one.service.d/override.conf": file("override", "L3"),
+		},
+		[],
+	)
+	denied := main.deny with input as inp with data.integrity as template_cfg
+	found(denied) == {
+		["added", "/etc/systemd/system/worker@one.service"],
+		["added", "/etc/systemd/system/worker@one.service.d/override.conf"],
+	}
+}
+
+test_template_instance_disabled if {
+	inp := template_input({}, ["/etc/systemd/system/multi-user.target.wants/worker@one.service"])
+	denied := main.deny with input as inp with data.integrity as template_cfg
+	found(denied) == {["deleted", "/etc/systemd/system/multi-user.target.wants/worker@one.service"]}
+}

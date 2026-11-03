@@ -69,13 +69,17 @@ failed=0
 run_case() {
   local name=$1 image=$2 data=$3 expected=$4
   shift 4
-  local out="$work/$name"
+  local out="$work/$name" rc=0
   WORK_DIR="$out" DATA_DIRS="$data" BASE_SYFT_JSON="$work/base.syft.json" \
     "$root/scripts/check-image.sh" \
     "registry:$(cat "$work/base.ref")" "registry:$(cat "$work/$image.ref")" \
-    > "$out.log" 2>&1 || true
+    > "$out.log" 2>&1 || rc=$?
 
-  local problems=()
+  local problems=() want_rc=0
+  [[ -z $expected ]] || want_rc=1
+  if [[ $rc -ne $want_rc ]]; then
+    problems+=("check-image.sh exited $rc, expected $want_rc; see $out.log")
+  fi
   if [[ ! -s "$out/results.json" ]]; then
     problems+=("no conftest output; see $out.log")
   else

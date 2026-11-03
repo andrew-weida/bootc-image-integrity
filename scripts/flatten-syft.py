@@ -24,7 +24,22 @@ def repository(ref):
     return f"{head}/{last}" if head else last
 
 
-def flatten(doc, ref):
+def check_digest(doc, ref, label):
+    """Exit unless the inventory was scanned from the digest in ref, if ref has one.
+
+    Guards against a reused inventory (BASE_SYFT_JSON) of a different image.
+    """
+    if "@sha256:" not in ref:
+        return
+    digest = ref.rsplit("@", 1)[1]
+    meta = doc.get("source", {}).get("metadata") or {}
+    scanned = [meta.get("userInput", ""), meta.get("manifestDigest", "")] + (meta.get("repoDigests") or [])
+    if not any(digest in s for s in scanned if s):
+        sys.exit(f"{label} inventory was scanned from {meta.get('userInput') or 'an unknown source'}, not {ref}")
+
+
+def flatten(doc, ref, label):
+    check_digest(doc, ref, label)
     files = {}
     for entry in doc.get("files") or []:
         location = entry["location"]
@@ -43,7 +58,9 @@ def flatten(doc, ref):
             "layer": location.get("layerID", ""),
         }
     if not files:
-        sys.exit("no file metadata in syft output; set SYFT_FILE_METADATA_SELECTION=all")
+        sys.exit(f"no file metadata in {label} inventory; set SYFT_FILE_METADATA_SELECTION=all")
+    if not any(f["sha256"] for f in files.values() if f["type"] == "RegularFile"):
+        sys.exit(f"no sha256 digests in {label} inventory; set SYFT_FILE_METADATA_DIGESTS=sha256")
 
     packages = {}
     for artifact in doc.get("artifacts") or []:
@@ -51,6 +68,8 @@ def flatten(doc, ref):
             continue
         owned = (artifact.get("metadata") or {}).get("files") or []
         packages.setdefault(artifact["name"], []).extend(f["path"] for f in owned)
+    if not packages:
+        sys.exit(f"no RPM packages in {label} inventory; is it a bootc image?")
 
     layers = [layer["digest"] for layer in doc["source"]["metadata"].get("layers") or []]
     return {
@@ -71,9 +90,9 @@ def main():
     args = parser.parse_args()
 
     with open(args.base) as f:
-        base = flatten(json.load(f), args.base_ref)
+        base = flatten(json.load(f), args.base_ref, "base")
     with open(args.image) as f:
-        image = flatten(json.load(f), args.image_ref)
+        image = flatten(json.load(f), args.image_ref, "image")
     json.dump({"base": base, "image": image}, sys.stdout, separators=(",", ":"))
 
 

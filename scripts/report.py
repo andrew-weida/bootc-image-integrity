@@ -23,9 +23,14 @@ def main():
     try:
         with open(args.conftest_json) as f:
             results = json.load(f)
+        if not isinstance(results, list) or not results:
+            raise ValueError("expected a non-empty list of results")
         failures = sorted(r["msg"] for res in results for r in res.get("failures") or [])
         warnings = sorted(r["msg"] for res in results for r in res.get("warnings") or [])
         successes = sum(res.get("successes", 0) for res in results)
+        # Zero means conftest found no rules, e.g. the policy isn't in package main.
+        if successes + len(failures) + len(warnings) == 0:
+            raise ValueError("no policy rules were evaluated")
     except (OSError, ValueError, KeyError, TypeError) as e:
         failures = warnings = None
         error = f"could not read conftest results: {e}"
