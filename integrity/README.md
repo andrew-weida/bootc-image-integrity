@@ -144,19 +144,73 @@ once when it has more than 20 entries. An added kernel module is reported on its
 
 ## Configuration
 
-[data/protected.yaml](data/protected.yaml) is an example for a hardened RHEL bootc base.
-Edit it for your base. Everything is keyed under `integrity:`.
+Conftest loads the YAML files in [data/](data/) as policy data. The two files have separate
+top-level keys: `integrity:` in `protected.yaml` and `exceptions:` in `exceptions.yaml`.
+Exceptions are not nested under `integrity:`.
 
-| Key | Meaning |
-|---|---|
-| `protected_packages` | Every file the base installs from these RPMs. Include libraries your agents load. |
-| `package_changes` | `fail`, `warn` (default) or `ignore`: what to do when an RPM's version differs from the base's, or an RPM the base has is missing. |
-| `forbidden_packages` | RPMs that must not be installed in the image, even if the base has them. This only sees RPMs: a binary copied in without one isn't caught. To allow one with an exception, use the package name as `path`. |
-| `protected_files` | Individual paths. A path the base lacks must stay absent. |
-| `sealed_dirs` | Nothing may be added, changed or removed underneath. |
-| `appendable_dirs` | Base files are protected. New files must be direct children matching `allow`. Use this only for directories application teams need to add to, and choose the pattern from the tool's precedence rule. For example, rsyslog runs files in name order and an earlier rule can discard messages, so application files must sort after the base's. |
-| `shadows` | A protected file under a key is overridden by the same name under each listed directory. |
-| `require_layered` | Fail when the base's layers aren't an unchanged prefix of the image's layers (squashed, rechunked, or built `FROM` another base digest). When false, such images only warn and skip `touched`. |
+### protected.yaml format
+
+[data/protected.yaml](data/protected.yaml) is an example for a hardened RHEL bootc base.
+Edit it for your base. Its top-level `integrity` value must be a YAML mapping.
+
+```yaml
+integrity:
+  require_layered: true
+  package_changes: warn
+  protected_packages:
+    - audit
+    - openssh-server
+  forbidden_packages:
+    - telnet
+  protected_files:
+    - /etc/containers/policy.json
+    - /usr/lib/sysctl.d/99-hardening.conf
+  sealed_dirs:
+    - /etc/ssh/sshd_config.d/
+  appendable_dirs:
+    - dir: /etc/rsyslog.d/
+      allow: '^[5-9][0-9]-[A-Za-z0-9_.-]+\.conf$'
+  shadows:
+    /usr/lib/sysctl.d/:
+      - /etc/sysctl.d/
+```
+
+Each field is optional individually. At least one of `protected_packages`,
+`protected_files`, `sealed_dirs`, `appendable_dirs` or `forbidden_packages` must be
+non-empty. Setting only `require_layered`, `package_changes` or `shadows` does not meet
+that requirement.
+
+| Key | YAML type | Default when omitted | Meaning |
+|---|---|---|---|
+| `protected_packages` | List of strings | `[]` | Protect files owned by these RPMs that exist in the base inventory. Include libraries your agents load. A listed package absent from the base produces a warning. |
+| `package_changes` | String: `fail`, `warn` or `ignore` | `warn` | What to do when a base RPM's version changes or the RPM is removed. This does not relax the file checks for protected packages. |
+| `forbidden_packages` | List of strings | `[]` | RPM names that must not be installed, even if the base has them. This does not detect binaries copied in without an RPM. |
+| `protected_files` | List of strings | `[]` | Exact paths to preserve. A path the base lacks must stay absent. Paths are not glob patterns. |
+| `sealed_dirs` | List of strings | `[]` | Directories under which nothing may be added, changed or removed, including nested entries. |
+| `appendable_dirs` | List of mappings with string fields `dir` and `allow` | `[]` | Preserve base entries; allow new direct children only when their names match the regular expression in `allow`. |
+| `shadows` | Mapping of source directory strings to lists of target directory strings | `{}` | For each protected source file, protect the equivalent path in each target directory so it cannot shadow the source. |
+| `require_layered` | Boolean: `true` or `false` | `false` | Require the base layers to be an unchanged prefix of the image layers. When false, a mismatch warns and skips `touched` checks; content comparisons still run. The supplied configuration sets this to `true`. |
+
+Use `[]` for an empty list and `{}` for an empty mapping. A key with no value is YAML
+`null`, which is not a substitute for either. Keep booleans unquoted.
+
+Path and pattern conventions:
+
+- Use absolute image paths. `sealed_dirs` and `appendable_dirs[].dir` accept directories
+  with or without a trailing `/`.
+- `appendable_dirs[].allow` is a regular expression applied to the child's name, not its
+  full path. Use `^` and `$` to match the whole name. Single-quoted YAML preserves
+  backslashes such as `\.`. The example permits `60-app.conf` but rejects `00-app.conf`
+  and nested paths such as `60-app/nested.conf`.
+- Use trailing `/` on both source and target directories in `shadows`: these strings are
+  literal prefixes. The example protects `/etc/sysctl.d/99-hardening.conf` because
+  `/usr/lib/sysctl.d/99-hardening.conf` is protected. Shadow paths are generated from
+  existing base paths selected by `protected_packages` or `protected_files`; sealing a
+  source directory alone does not generate them.
+
+Use appendable directories only where applications need to add files, and choose the
+pattern from the tool's precedence rules. For example, rsyslog runs files in name order,
+and an earlier rule can discard messages, so application files must sort after the base's.
 
 These are derived automatically from the protected set:
 
@@ -168,10 +222,51 @@ These are derived automatically from the protected set:
 
 The configuration itself is validated: a missing `integrity:` section, an unknown or mistyped key, or a configuration that protects nothing fails the check instead of silently protecting less.
 
-**Exceptions** go in [data/exceptions.yaml](data/exceptions.yaml). Each one is scoped to one
-image repository and a path glob, and stops applying on its `expires` date. While active, an
-exception turns its violation into a warning; once it expires, the build fails again and
-reports the expiry.
+### exceptions.yaml format
+
+[data/exceptions.yaml](data/exceptions.yaml) contains a top-level `exceptions` list. Use
+`exceptions: []` when no deviations are approved; omitting the key also defaults to no
+exceptions.
+
+```yaml
+exceptions:
+  - image: registry.example.com/team-x/app
+    path: /etc/sysctl.d/99-team-x.conf
+    ticket: SEC-1234
+    expires: "2027-03-31"
+    reason: Needs net.core.somaxconn above the hardened default.
+  - image: registry.example.com/team-x/app
+    path: telnet
+    ticket: SEC-1235
+    expires: "2027-03-31"
+    reason: Temporary compatibility requirement.
+```
+
+Every entry requires all five fields, and every value must be a string:
+
+| Field | Format | Meaning |
+|---|---|---|
+| `image` | Exact image repository, without a tag, digest or transport prefix | Matches `registry.example.com/team-x/app` across its tags and digests. Wildcards are not supported here. |
+| `path` | Exact finding path or glob | Matches file or directory findings. For a forbidden RPM or a package change treated as a failure, use the package name, such as `telnet`. |
+| `ticket` | Approval reference, such as `SEC-1234` | Identifies the approval in warning messages. |
+| `expires` | Quoted, valid calendar date in `"YYYY-MM-DD"` format | The exception stops applying at 00:00 UTC on this date, not at the end of the day. Quoting keeps YAML from treating it as a date value instead of a string. |
+| `reason` | Explanation of the approved deviation | Records why the deviation is needed. |
+
+Exception matching and results:
+
+- `path` uses glob syntax, not the regular expressions used by `appendable_dirs[].allow`.
+  `*` stays within one path component; `**` can cross `/`. For example,
+  `/etc/sysctl.d/*.conf` matches direct children, while `/opt/agent/**` can match nested
+  paths.
+- Exceptions match the path shown in the finding. If a large added or deleted directory
+  is reported as one finding, the exception must match that directory path itself.
+- An active exception turns a matching failure into a warning. It applies to all finding
+  kinds at that path; there is no separate `kind` selector. It cannot waive invalid
+  configuration or a `require_layered` failure.
+- On the expiry date, a matching violation fails again. Expired entries for the image's
+  repository also produce an expiry warning. Entries with missing or non-string fields,
+  or an expiry value outside the required date format, are ignored with a warning and
+  do not grant an exception.
 
 ## Run locally
 
