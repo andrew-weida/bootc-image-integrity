@@ -2,7 +2,7 @@
 """Reduce two syft-json documents (base image, derived image) to the policy input.
 
 The policy only needs, per image: the layer list, each file's metadata keyed by path,
-and the files each RPM owns. Dropping everything else keeps the input small enough for
+and each RPM's files and version. Dropping everything else keeps the input small enough for
 OPA to evaluate a full bootc image comfortably.
 
 usage: flatten-syft.py --base BASE.syft.json --image IMAGE.syft.json --image-ref REF > input.json
@@ -63,11 +63,13 @@ def flatten(doc, ref, label):
         sys.exit(f"no sha256 digests in {label} inventory; set SYFT_FILE_METADATA_DIGESTS=sha256")
 
     packages = {}
+    versions = {}
     for artifact in doc.get("artifacts") or []:
         if artifact.get("type") != "rpm":
             continue
         owned = (artifact.get("metadata") or {}).get("files") or []
         packages.setdefault(artifact["name"], []).extend(f["path"] for f in owned)
+        versions.setdefault(artifact["name"], set()).add(artifact.get("version", ""))
     if not packages:
         sys.exit(f"no RPM packages in {label} inventory; is it a bootc image?")
 
@@ -78,6 +80,7 @@ def flatten(doc, ref, label):
         "layers": layers,
         "files": files,
         "packages": packages,
+        "versions": {name: sorted(v) for name, v in versions.items()},
     }
 
 

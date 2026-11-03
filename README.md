@@ -57,7 +57,9 @@ symlink, so auditd no longer starts. Reported as `deleted`.
 ### Overriding
 
 The protected file is untouched, but a new file adds settings that take precedence over
-it.
+it. Overrides are caught only where the configuration looks: sealed and appendable
+directories, protected paths, and the drop-in directories derived for protected systemd
+units.
 
 ```dockerfile
 RUN mkdir -p /etc/systemd/system/auditd.service.d && \
@@ -105,6 +107,24 @@ RUN dnf install -y telnet
 
 Reported as `forbidden telnet`.
 
+### Changing packages and the kernel
+
+`package_changes` reports every RPM whose version differs from the base's, and every RPM
+the base has that the image doesn't. It warns by default; set it to `fail` if application
+teams must not update system packages.
+
+```dockerfile
+RUN dnf -y update
+```
+
+Reported as `package openssh-server: version changed from … to …` for each package. The
+files of protected packages also change, so those fail as `modified` regardless.
+
+The example configuration seals `/usr/lib/modules/`, which holds the kernel, its initramfs
+and its modules. A kernel update is reported as one `added` and one `deleted` finding for
+the two kernel directories, because a directory that is new or gone as a whole is reported
+once when it has more than 20 entries. An added kernel module is reported on its own.
+
 ### Findings
 
 | Finding | Example |
@@ -115,6 +135,7 @@ Reported as `forbidden telnet`.
 | `added` (shadow) | `/etc/sysctl.d/99-hardening.conf → /dev/null` masking `/usr/lib/sysctl.d/99-hardening.conf`; `/usr/local/bin/sshd` |
 | `added` (name) | `/etc/rsyslog.d/00-app.conf`, whose name sorts ahead of the base's log forwarding |
 | `forbidden` | `dnf install telnet` when `telnet` is in `forbidden_packages` |
+| `package` | `dnf -y update` changing a package's version; `rpm -e` of a base package. Warns unless `package_changes: fail`. |
 | `touched` | Protected file rewritten with the same content. This catches changes syft doesn't record (SELinux labels, file capabilities, other xattrs), but only for layered images (below). |
 
 ## Configuration
@@ -125,6 +146,7 @@ Edit it for your base. Everything is keyed under `integrity:`.
 | Key | Meaning |
 |---|---|
 | `protected_packages` | Every file the base installs from these RPMs. Include libraries your agents load. |
+| `package_changes` | `fail`, `warn` (default) or `ignore`: what to do when an RPM's version differs from the base's, or an RPM the base has is missing. |
 | `forbidden_packages` | RPMs that must not be installed in the image, even if the base has them. This only sees RPMs: a binary copied in without one isn't caught. To allow one with an exception, use the package name as `path`. |
 | `protected_files` | Individual paths. A path the base lacks must stay absent. |
 | `sealed_dirs` | Nothing may be added, changed or removed underneath. |
@@ -202,11 +224,86 @@ tasks:
 
 The step images are pinned by tag. Pin them by digest before production use.
 
-**Sizing**, measured on `quay.io/fedora/fedora-bootc:42` (128,000 files):
+## From syft JSON to policy input
 
-- **Each syft scan:** about 1 minute, producing an 87 MB inventory.
-- **conftest:** about 10 seconds. It needs between 512 MiB and 1 GiB of memory, so the
-  Task requests 1 GiB with a 2 GiB limit.
+syft produces a general-purpose SBOM. [flatten-syft.py](scripts/flatten-syft.py) reduces
+the two inventories to the policy input, `input.json`, which keeps only what the policy
+reads. Two things drive this:
+
+- **Size.** OPA loads the whole input into memory. The flattened `input.json` discards uneeded information to reduce the size.
+
+- **Lookup by path.** syft lists files in an array; the policy asks "what does the base
+  have at this path?" thousands of times, so files are keyed by path.
+
+### Files
+
+The same file, `/usr/bin/sshd`, in each format. The syft entry is trimmed; the full one
+also has ELF details such as imported libraries and stack protection.
+
+```jsonc
+// syft JSON: one element of "files"
+{
+  "id": "16102077dca26d57",
+  "location": {"path": "/usr/bin/sshd", "layerID": "sha256:bf9dda24…"},
+  "metadata": {"mode": 755, "type": "RegularFile", "userID": 0, "groupID": 0,
+               "mimeType": "application/x-sharedlib", "size": 400520},
+  "digests": [{"algorithm": "sha256", "value": "02d3f7ee…"}],
+  "executable": {"format": "elf", "importedLibraries": ["libcrypto.so.3", …], …}
+}
+```
+
+```jsonc
+// input.json: base.files (or image.files), keyed by path
+"/usr/bin/sshd": {"type": "RegularFile", "mode": 755, "uid": 0, "gid": 0,
+                  "sha256": "02d3f7ee…", "link": "", "layer": "sha256:bf9dda24…"}
+```
+
+| input.json | syft JSON | Used for |
+|---|---|---|
+| key | `location.path` | Looking up a path in either image |
+| `type`, `mode`, `uid`, `gid` | `metadata.type`, `.mode`, `.userID`, `.groupID` | `modified` |
+| `sha256` | the `sha256` entry in `digests` | `modified` |
+| `link` | `metadata.linkDestination` | `modified`, redirecting symlinks |
+| `layer` | `location.layerID` | `touched`, and the layer shown in each finding |
+
+### Packages
+
+The policy only needs to know which paths each protected RPM owns. syft lists every
+package it finds (kernel modules, Go modules, Python packages, RPMs) under `artifacts`,
+with versions, licenses, CPEs and a full file list. Only RPMs are kept, as name → paths:
+
+```jsonc
+// syft JSON: one element of "artifacts" (trimmed)
+{"name": "openssh-server", "type": "rpm", "version": "10.2p1-16.fc44",
+ "metadata": {"files": [{"path": "/etc/pam.d/sshd", "mode": 33188, "digest": {…}, …}, …], …}}
+
+// input.json: base.packages
+"openssh-server": ["/etc/pam.d/sshd", "/etc/ssh/sshd_config", "/etc/ssh/sshd_config.d", …]
+```
+
+The RPM's recorded digests and modes are dropped on purpose: they describe what the
+package installed, not what is in the image. The policy compares the files themselves.
+
+### Per image
+
+Each of `base` and `image` also has:
+
+| Field | From | Used for |
+|---|---|---|
+| `layers` | the `digest` of each `source.metadata.layers` entry | Deciding whether the image is layered on the base |
+| `versions` | each RPM artifact's `version`, as name → list of versions | `package` |
+| `ref` | the reference passed to the script | Reporting |
+| `repository` | `ref` without tag or digest | Matching exceptions |
+
+### Checks before flattening
+
+The script stops instead of producing input that would silently protect less if:
+
+- the inventory wasn't scanned from the digest in the reference, e.g. a stale
+  `BASE_SYFT_JSON`
+- it has no file metadata (`SYFT_FILE_METADATA_SELECTION=all` not set)
+- it has no sha256 digests (`SYFT_FILE_METADATA_DIGESTS=sha256` not set)
+- it has no RPMs
 
 ## Gotcha's / Limitations
 
@@ -219,11 +316,16 @@ The step images are pinned by tag. Pin them by digest before production use.
 - **Paths are compared literally.** An RPM path that reaches the file through a symlinked
   directory isn't found in the base inventory, so it isn't protected. Put the real path in
   `protected_files`.
+- **Override coverage is only as complete as the configuration.** Only systemd unit
+  overrides are derived automatically. Every other directory where a new file changes
+  behaviour must be listed in `sealed_dirs` or `appendable_dirs`. The example seals the
+  common ones; `/etc/profile.d/` is deliberately left open, and packages can still add
+  files under `/usr/lib/tmpfiles.d/`, `/usr/lib/sysusers.d/` and `/usr/lib/modprobe.d/`
+  unless you seal those too.
 - **Effective configuration isn't evaluated.** A setting can be weakened through a path
   that isn't protected, for example a new `Include` in an unprotected file. Protect the
   directories each tool reads, or add a runtime check such as `sshd -T`.
-- **Build time only.** Running hosts need their own checks; see the "Protecting the
-  Signature Policy" section of the bootc reference.
+- **Build time only.** Running hosts need their own checks.
 
 ## Tests
 

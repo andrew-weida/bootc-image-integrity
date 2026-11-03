@@ -193,12 +193,57 @@ findings contains finding(p, "added", image.files[p].layer, "not present in the 
 	some p in watched
 	not base.files[p]
 	image.files[p]
+	not collapsed(p, collapsed_added)
 }
 
 findings contains finding(p, "deleted", "", "present in the base image but missing") if {
 	some p in watched
 	base.files[p]
 	not image.files[p]
+	not collapsed(p, collapsed_deleted)
+}
+
+# A large directory that is new or gone as a whole, such as a kernel's /usr/lib/modules/<version>/
+# after a kernel update, is reported once instead of once per file.
+collapse_threshold := 20
+
+new_dirs := {p | some p in watched; image.files[p].type == "Directory"; not base.files[p]}
+
+gone_dirs := {p | some p in watched; base.files[p].type == "Directory"; not image.files[p]}
+
+collapsed_added := {d: n |
+	some d in new_dirs
+	not under(d, new_dirs)
+	n := count({p | some p in watched; startswith(p, concat("", [d, "/"])); image.files[p]})
+	n > collapse_threshold
+}
+
+collapsed_deleted := {d: n |
+	some d in gone_dirs
+	not under(d, gone_dirs)
+	n := count({p | some p in watched; startswith(p, concat("", [d, "/"])); base.files[p]})
+	n > collapse_threshold
+}
+
+findings contains finding(d, "added", image.files[d].layer, sprintf("directory not present in the base image, with %d entries", [n])) if {
+	some d, n in collapsed_added
+}
+
+findings contains finding(d, "deleted", "", sprintf("directory present in the base image but missing, with %d entries", [n])) if {
+	some d, n in collapsed_deleted
+}
+
+# p is a collapsed directory or anything inside one.
+collapsed(p, dirs) if dirs[p]
+
+collapsed(p, dirs) if {
+	some a in ancestors(p)
+	dirs[a]
+}
+
+under(p, dirs) if {
+	some a in ancestors(p)
+	a in dirs
 }
 
 findings contains finding(p, "modified", a.layer, sprintf("changed %s", [concat(", ", changed)])) if {
@@ -274,6 +319,29 @@ findings contains finding(name, "forbidden", "", "package must not be installed"
 	image.packages[name]
 }
 
+# Package changes: an RPM whose version differs from the base's, or that the base has and
+# the image doesn't. package_changes decides whether they fail, warn (the default) or are
+# ignored. The finding's path is the package name, so exceptions match on it.
+default package_mode := "warn"
+
+package_mode := cfg.package_changes
+
+package_changes contains finding(name, "package", "", sprintf("version changed from %s to %s", [concat(", ", old), concat(", ", new)])) if {
+	some name, old in base.versions
+	new := image.versions[name]
+	old != new
+}
+
+package_changes contains finding(name, "package", "", "removed") if {
+	some name, _ in base.versions
+	not image.versions[name]
+}
+
+findings contains v if {
+	package_mode == "fail"
+	some v in package_changes
+}
+
 # ---------------------------------------------------------------------------
 # Exceptions (data.exceptions): {image, path, ticket, expires, reason}. `image` is the
 # repository without tag or digest; `path` is a glob where * stays within one directory.
@@ -304,7 +372,7 @@ excepted(path) if count(active_exceptions(path)) > 0
 # Configuration checks. A missing, misspelled or mistyped key would otherwise silently
 # protect nothing.
 
-config_keys := {"require_layered", "forbidden_packages", "protected_packages", "protected_files", "sealed_dirs", "appendable_dirs", "shadows"}
+config_keys := {"require_layered", "package_changes", "forbidden_packages", "protected_packages", "protected_files", "sealed_dirs", "appendable_dirs", "shadows"}
 
 string_list_keys := ["forbidden_packages", "protected_packages", "protected_files", "sealed_dirs"]
 
@@ -328,6 +396,11 @@ config_errors contains sprintf("%s must be a list of strings", [k]) if {
 config_errors contains "require_layered must be true or false" if {
 	v := cfg.require_layered
 	not is_boolean(v)
+}
+
+config_errors contains "package_changes must be fail, warn or ignore" if {
+	v := cfg.package_changes
+	not v in {"fail", "warn", "ignore"}
 }
 
 config_errors contains "appendable_dirs must be a list of {dir, allow} entries" if {
@@ -383,6 +456,11 @@ warn contains {"msg": sprintf("allowed by exception %s until %s: %s", [e.ticket,
 deny contains {"msg": sprintf("%s; require_layered is set", [not_layered_msg])} if {
 	not layered
 	require_layered
+}
+
+warn contains {"msg": message(v), "details": v} if {
+	package_mode == "warn"
+	some v in package_changes
 }
 
 warn contains {"msg": sprintf("%s; 'touched' checks are skipped, content checks still apply", [not_layered_msg])} if {

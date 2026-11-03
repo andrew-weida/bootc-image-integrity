@@ -433,3 +433,66 @@ test_protected_instance_disabled if {
 	denied := main.deny with input as inp with data.integrity as instance_cfg
 	found(denied) == {["deleted", link]}
 }
+
+# --- kernel and package changes ----------------------------------------------
+
+modules_cfg := object.union(cfg, {"sealed_dirs": array.concat(cfg.sealed_dirs, ["/usr/lib/modules/"])})
+
+kernel_tree(version, layer) := object.union(
+	{concat("", ["/usr/lib/modules/", version]): dir(layer)},
+	{sprintf("/usr/lib/modules/%s/kernel/mod%d.ko.xz", [version, i]): file(sprintf("%s-%d", [version, i]), layer) | some i in numbers.range(1, 25)},
+)
+
+kernel_input(image_files) := {
+	"base": object.union(base, {"files": object.union(base_files, kernel_tree("6.1", "L1"))}),
+	"image": object.union(derived({}, [])["image"], {"files": object.union(base_files, image_files)}),
+}
+
+test_kernel_update_reported_once_per_directory if {
+	denied := main.deny with input as kernel_input(kernel_tree("6.2", "L3")) with data.integrity as modules_cfg
+	messages(denied) == {
+		"added /usr/lib/modules/6.2: directory not present in the base image, with 25 entries (layer L3)",
+		"deleted /usr/lib/modules/6.1: directory present in the base image but missing, with 25 entries",
+	}
+}
+
+test_kernel_module_added if {
+	files := object.union(kernel_tree("6.1", "L1"), {"/usr/lib/modules/6.1/extra/rootkit.ko": file("rootkit", "L3"), "/usr/lib/modules/6.1/extra": dir("L3")})
+	denied := main.deny with input as kernel_input(files) with data.integrity as modules_cfg
+	found(denied) == {["added", "/usr/lib/modules/6.1/extra"], ["added", "/usr/lib/modules/6.1/extra/rootkit.ko"]}
+}
+
+with_versions(base_versions, image_versions) := object.union(derived({}, []), {
+	"base": {"versions": base_versions},
+	"image": {"versions": image_versions},
+})
+
+updated := with_versions({"openssh-server": ["9.9p1-1"], "audit": ["4.0-1"]}, {"openssh-server": ["9.9p1-2"]})
+
+test_package_changes_warn_by_default if {
+	count(deny_for(updated)) == 0
+	messages(warn_for(updated)) == {
+		"package openssh-server: version changed from 9.9p1-1 to 9.9p1-2",
+		"package audit: removed",
+	}
+}
+
+test_package_changes_fail if {
+	strict := object.union(cfg, {"package_changes": "fail"})
+	denied := main.deny with input as updated with data.integrity as strict
+	found(denied) == {["package", "openssh-server"], ["package", "audit"]}
+}
+
+test_package_changes_ignore if {
+	quiet := object.union(cfg, {"package_changes": "ignore"})
+	denied := main.deny with input as updated with data.integrity as quiet
+	warned := main.warn with input as updated with data.integrity as quiet
+	count(denied) == 0
+	count(warned) == 0
+}
+
+test_package_changes_invalid_value if {
+	bad := object.union(cfg, {"package_changes": "maybe"})
+	denied := main.deny with input as derived({}, []) with data.integrity as bad
+	messages(denied) == {"invalid configuration: package_changes must be fail, warn or ignore"}
+}

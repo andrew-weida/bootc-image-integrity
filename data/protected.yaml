@@ -6,6 +6,10 @@ integrity:
   # built FROM another base digest). Without this they only lose the 'touched' checks.
   require_layered: true
 
+  # RPMs whose version differs from the base's, or that the base has and the image doesn't:
+  # fail, warn or ignore. Use fail if application teams must not update system packages.
+  package_changes: warn
+
   # Every file the base installs from these RPMs must be identical in derived images.
   # Include the libraries your agents load: replacing a shared library is as effective
   # as replacing the agent binary.
@@ -32,6 +36,7 @@ integrity:
     - /etc/systemd/system.conf            # DefaultEnvironment= applies to every service
     - /etc/containers/policy.json
     - /etc/selinux/config                 # SELINUX=permissive disables enforcement
+    - /etc/environment                    # pam_env sets these variables for every login
     - /usr/lib/ostree/prepare-root.conf   # composefs / transient /etc settings
     - /etc/ostree/prepare-root.conf       # overrides the /usr/lib file via the initramfs
 
@@ -56,7 +61,21 @@ integrity:
     - /usr/lib/systemd/system-environment-generators/
     - /usr/local/lib/systemd/system-environment-generators/
     - /usr/lib/bootc/kargs.d/
+    - /usr/lib/modules/                   # kernel, initramfs and kernel modules
     - /var/roothome/.config/containers/   # root's policy.json overrides /etc
+    # Application teams may ask for these. Each has a safer alternative in the
+    # application's own unit file.
+    - /etc/tmpfiles.d/          # can create or overwrite any file at boot; use StateDirectory=, LogsDirectory=
+    - /etc/sysusers.d/          # can create a UID 0 user; use DynamicUser=
+    - /etc/security/limits.d/   # applies to logins, not services; use LimitNOFILE= in the unit
+    - /etc/modprobe.d/          # changes how kernel modules load
+    # Packages ship the same kinds of files under /usr/lib. Uncomment to block that too;
+    # installing such a package then needs an exception.
+    # - /usr/lib/tmpfiles.d/
+    # - /usr/lib/sysusers.d/
+    # - /usr/lib/modprobe.d/
+    # Not listed on purpose: /etc/profile.d/ affects only login shells, and teams often set
+    # JAVA_HOME there.
 
   # Derived images may add files here only under names that cannot override the base.
   # Files the base already ships in these directories are protected. List only directories
