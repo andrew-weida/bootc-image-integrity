@@ -358,7 +358,7 @@ test_missing_config_fails if {
 
 test_empty_config_fails if {
 	denied := main.deny with input as derived({}, []) with data.integrity as {}
-	messages(denied) == {"invalid configuration: nothing is protected; set protected_packages or protected_files"}
+	messages(denied) == {"invalid configuration: nothing is protected"}
 }
 
 test_mistyped_config_fails if {
@@ -402,4 +402,34 @@ test_template_instance_disabled if {
 	inp := template_input({}, ["/etc/systemd/system/multi-user.target.wants/worker@one.service"])
 	denied := main.deny with input as inp with data.integrity as template_cfg
 	found(denied) == {["deleted", "/etc/systemd/system/multi-user.target.wants/worker@one.service"]}
+}
+
+test_absent_config_fails if {
+	# No `with data.integrity`: conftest verify loads no data, so the key is truly absent.
+	denied := main.deny with input as derived({}, [])
+	messages(denied) == {"invalid configuration: data.integrity is missing or not a map"}
+}
+
+test_directory_only_config if {
+	dirs_only := {"sealed_dirs": ["/etc/pam.d"]}
+	clean := main.deny with input as derived({}, []) with data.integrity as dirs_only
+	tampered := main.deny with input as derived({"/etc/pam.d/evil": file("evil", "L3")}, []) with data.integrity as dirs_only
+	count(clean) == 0
+	found(tampered) == {["added", "/etc/pam.d/evil"]}
+}
+
+instance_files := object.union(base_files, {
+	"/usr/lib/systemd/system/worker@one.service": file("worker-one", "L2"),
+	"/etc/systemd/system/multi-user.target.wants/worker@one.service": symlink("/usr/lib/systemd/system/worker@one.service", "L2"),
+})
+
+test_protected_instance_disabled if {
+	instance_cfg := object.union(cfg, {"protected_files": array.concat(cfg.protected_files, ["/usr/lib/systemd/system/worker@one.service"])})
+	link := "/etc/systemd/system/multi-user.target.wants/worker@one.service"
+	inp := {
+		"base": object.union(base, {"files": instance_files}),
+		"image": object.union(derived({}, [])["image"], {"files": object.remove(instance_files, [link])}),
+	}
+	denied := main.deny with input as inp with data.integrity as instance_cfg
+	found(denied) == {["deleted", link]}
 }

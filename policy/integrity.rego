@@ -88,8 +88,12 @@ protected contains p if {
 	some p, f in base.files
 	f.type == "SymbolicLink"
 	regex.match(`^/(etc|usr/lib)/systemd/system/[^/]+\.(wants|requires)/[^/]+$`, p)
-	template_of(basename(p)) in protected_units
+	protected_unit_name(basename(p))
 }
+
+protected_unit_name(name) if name in protected_units
+
+protected_unit_name(name) if template_of(name) in protected_units
 
 # Sealed directories: nothing may be added, changed or removed underneath.
 sealed_dirs contains dir_prefix(d) if some d in cfg.sealed_dirs
@@ -304,7 +308,11 @@ config_keys := {"require_layered", "forbidden_packages", "protected_packages", "
 
 string_list_keys := ["forbidden_packages", "protected_packages", "protected_files", "sealed_dirs"]
 
-config_errors contains "data.integrity is missing or not a map" if not is_object(data.integrity)
+# A separate rule, because `not is_object(data.integrity)` is undefined, not true, when the
+# key is absent.
+has_config if is_object(data.integrity)
+
+config_errors contains "data.integrity is missing or not a map" if not has_config
 
 config_errors contains sprintf("unknown key %s", [k]) if {
 	some k, _ in cfg
@@ -332,10 +340,12 @@ config_errors contains "shadows must map each directory to a list of directories
 	not valid_shadows(v)
 }
 
-config_errors contains "nothing is protected; set protected_packages or protected_files" if {
-	is_object(data.integrity)
-	count(object.get(cfg, "protected_packages", [])) + count(object.get(cfg, "protected_files", [])) == 0
+config_errors contains "nothing is protected" if {
+	has_config
+	every k in protection_keys { count(object.get(cfg, k, [])) == 0 }
 }
+
+protection_keys := ["protected_packages", "protected_files", "sealed_dirs", "appendable_dirs", "forbidden_packages"]
 
 string_list(v) if {
 	is_array(v)
