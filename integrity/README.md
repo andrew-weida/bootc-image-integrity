@@ -114,8 +114,8 @@ Reported as `forbidden telnet`.
 ### Changing packages and the kernel
 
 `package_changes` reports every RPM whose version differs from the base's, and every RPM
-the base has that the image doesn't. It warns by default; set it to `fail` if application
-teams must not update system packages.
+the base has that the image doesn't. It warns by default; set it to `fail` if dervied
+images must not update system packages.
 
 ```dockerfile
 RUN dnf -y update
@@ -304,7 +304,7 @@ Environment variables:
 
 ```yaml
 # Pipeline excerpt. Whoever controls the `integrity` workspace controls the policy, so
-# clone it from a repository the application teams cannot push to, at a pinned commit.
+# clone it from a repository the teams building dertived images cannot push to, at a pinned commit.
 tasks:
   - name: fetch-integrity-policy
     taskRef: {name: git-clone}

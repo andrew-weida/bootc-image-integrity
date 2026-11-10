@@ -7,8 +7,8 @@ integrity:
   require_layered: true
 
   # `package_changes` reports every RPM whose version differs from the base's, and every RPM
-  # the base has that the image doesn't. It warns by default; set it to `fail` if application
-  # teams must not update ANY system packages.
+  # the base has that the image doesn't. It warns by default; set it to `fail` if derived
+  # images must not update ANY system packages.
   package_changes: warn
 
   # Every file the base installs from these RPMs must be identical in derived images.
@@ -65,7 +65,7 @@ integrity:
     - /usr/lib/bootc/kargs.d/
     - /usr/lib/modules/                   # kernel, initramfs and kernel modules
     - /var/roothome/.config/containers/   # root's policy.json overrides /etc
-    # Application teams may ask for these. Each has a safer alternative in the
+    # Users building derived images may ask for these. Each has a safer alternative in the
     # application's own unit file.
     - /etc/tmpfiles.d/          # can create or overwrite any file at boot; use StateDirectory=, LogsDirectory=
     - /etc/sysusers.d/          # can create a UID 0 user; use DynamicUser=
@@ -82,12 +82,10 @@ integrity:
     # - /usr/lib/tmpfiles.d/
     # - /usr/lib/sysusers.d/
     # - /usr/lib/modprobe.d/
-    # Not listed on purpose: /etc/profile.d/ affects only login shells, and teams often set
-    # JAVA_HOME there.
 
   # Derived images may add files here only under names that cannot override the base.
   # Files the base already ships in these directories are protected. List only directories
-  # application teams need to add to; seal the rest.
+  # derived images need to add to; seal the rest.
   appendable_dirs:
     # rsyslog runs these files in name order, before the rules in rsyslog.conf, and any rule
     # can discard a message. Keep the base's forwarding in 00-49 (e.g. 10-siem.conf) so
