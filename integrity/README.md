@@ -184,8 +184,8 @@ that requirement.
 |---|---|---|---|
 | `protected_packages` | List of strings | `[]` | Protect files owned by these RPMs that exist in the base inventory. Include libraries your agents load. A listed package absent from the base produces a warning. |
 | `package_changes` | String: `fail`, `warn` or `ignore` | `warn` | What to do when a base RPM's version changes or the RPM is removed. This does not relax the file checks for protected packages. |
-| `forbidden_packages` | List of strings | `[]` | RPM names that must not be installed, even if the base has them. This does not detect binaries copied in without an RPM. |
-| `protected_files` | List of strings | `[]` | Exact paths to preserve. A path the base lacks must stay absent. Paths are not glob patterns. |
+| `forbidden_packages` | List of strings | `[]` | RPM names that must not be installed. This does not detect binaries copied in without an RPM. |
+| `protected_files` | List of strings | `[]` | Exact file paths to preserve. A file path the base lacks must stay absent. Paths are not glob patterns. |
 | `sealed_dirs` | List of strings | `[]` | Directories under which nothing may be added, changed or removed, including nested entries. |
 | `appendable_dirs` | List of mappings with string fields `dir` and `allow` | `[]` | Preserve base entries; allow new direct children only when their names match the regular expression in `allow`. |
 | `shadows` | Mapping of source directory strings to lists of target directory strings | `{}` | For each protected source file, protect the equivalent path in each target directory so it cannot shadow the source. |
